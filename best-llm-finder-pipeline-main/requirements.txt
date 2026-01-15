@@ -1,0 +1,29 @@
+# requirements.txt
+# Dependencies for the "LLM Decider Pipeline" project
+
+# Core library for interacting with OpenAI-compatible LLM APIs
+openai
+
+# Data manipulation and analysis, used for creating the final summary tables
+pandas
+
+# For defining strict data schemas (like InsuranceFormData) to structure LLM outputs
+pydantic
+
+# For loading and extracting text from the PDF document in the Agentic RAG use case
+pypdf
+
+# For making HTTP requests, specifically to download the PDF file from a URL
+requests
+
+# Provides the Natural Language Toolkit, used for sentence tokenization (`sent_tokenize`)
+nltk
+
+# Provides the AutoTokenizer for accurately estimating token counts for various models
+transformers
+
+# For creating elegant progress bars during long-running data processing
+tqdm
+
+# Required for running the notebooks and displaying rich content like Markdown, Images, and DataFrames
+ipython
