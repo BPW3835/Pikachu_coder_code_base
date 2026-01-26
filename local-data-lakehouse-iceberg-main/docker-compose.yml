@@ -1,0 +1,192 @@
+services:
+  # REST Catalog
+  gravitino:
+    build:
+      context: .
+      dockerfile: ./infrastructure/gravitino/Dockerfile
+      args:
+        - GRAVITINO_IMAGE_TAG=${GRAVITINO_IMAGE_TAG}
+        - HADOOP_AWS_JAR_VERSION=${HADOOP_AWS_JAR_VERSION}
+        - AWS_JAVA_SDK_BUNDLE_JAR_VERSION=${AWS_JAVA_SDK_BUNDLE_JAR_VERSION}
+    container_name: gravitino
+    ports:
+      - "8090:8090"
+      - "9001:9001"
+    env_file:
+      - .env
+    volumes:
+      - ./infrastructure/common:/tmp/common
+      - ./infrastructure/gravitino/conf:/tmp/conf
+      - ./infrastructure/gravitino/healthcheck:/tmp/healthcheck
+      - ./infrastructure/gravitino/volumes/data:/root/gravitino/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "chmod +x /tmp/healthcheck/healthcheck.sh && /tmp/healthcheck/healthcheck.sh"]
+      start_period: 30s   # or 90s
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    networks:
+      - local-data-lakehouse-iceberg
+      
+  # Metastore DB: PostgreSQL
+  postgres:
+    platform: linux/amd64
+    image: postgres:${POSTGRESQL_IMAGE_TAG}
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: catalog_metastore_db
+    volumes:
+      - ./infrastructure/postgres/volumes/data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d catalog_metastore_db"]
+      interval: 5s
+      timeout: 60s
+      retries: 5
+      start_period: 20s
+    networks:
+      - local-data-lakehouse-iceberg
+
+  # Distributed Compute Engine: Apache Spark
+  spark-master:
+    platform: linux/amd64
+    image: spark-image
+    build:
+      context: .
+      dockerfile: ./infrastructure/spark/Dockerfile
+      args:
+        - PYTHON_VERSION=${PYTHON_VERSION}
+        - SPARK_SCALA_VERSION=${SPARK_SCALA_VERSION}
+        - ICEBERG_VERSION=${ICEBERG_VERSION}
+        - SPARK_VERSION=${SPARK_VERSION}
+        - POSTGRESQL_JAR_VERSION=${POSTGRESQL_JAR_VERSION}
+        - HADOOP_AWS_JAR_VERSION=${HADOOP_AWS_JAR_VERSION}
+        - AWS_JAVA_SDK_BUNDLE_JAR_VERSION=${AWS_JAVA_SDK_BUNDLE_JAR_VERSION}
+    container_name: spark-master
+    ports:
+      - "8080:8080"
+      - "4040:4040"
+      - "7077:7077"
+    env_file:
+      - .env
+      - ./infrastructure/spark/.env.spark
+    volumes:
+      - ./infrastructure/common:/tmp/common
+      - ./infrastructure/spark/conf:/tmp/conf
+      - ./pipelines:/opt/spark/apps/pipelines
+      - ./setup:/opt/spark/apps/setup
+      - ./infrastructure/spark/logs/:/opt/spark/spark-events
+    depends_on:
+      gravitino:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    entrypoint: ["./init/init.sh", "master"]
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8080" ]
+      interval: 5s
+      timeout: 60s
+      retries: 5
+      start_period: 20s
+    networks:
+      - local-data-lakehouse-iceberg
+
+  spark-worker:
+    platform: linux/amd64
+    image: spark-image
+    container_name: spark-worker
+    env_file:
+      - .env
+      - ./infrastructure/spark/.env.spark
+    volumes:
+      - ./infrastructure/common:/tmp/common
+      - ./infrastructure/spark/conf:/tmp/conf
+      - ./pipelines:/opt/spark/apps
+      - ./infrastructure/spark/logs/:/opt/spark/spark-events
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    entrypoint: ['./init/init.sh', 'worker']
+    networks:
+      - local-data-lakehouse-iceberg
+
+  # Object Storage: MinIO
+  minio:
+    platform: linux/amd64
+    image: minio/minio:${MINIO_IMAGE_TAG}
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9002:9002"
+    env_file:
+      - .env
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniopass
+    volumes:
+      - ./infrastructure/minio/volumes/data/:/data
+    command: server /data --address :9000 --console-address ':9002'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 60s
+      retries: 5
+      start_period: 20s
+    networks:
+      - local-data-lakehouse-iceberg
+  
+  minio-client:
+    platform: linux/amd64
+    image: "minio/mc:${MINIO_CLIENT_IMAGE_TAG}"
+    container_name: minio-client
+    env_file:
+      - .env
+    depends_on:
+      minio: 
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set myminio http://minio:9000 minio miniopass;
+      /usr/bin/mc mb myminio/iceberg --ignore-existing;
+      /usr/bin/mc mb myminio/iceberg/warehouse --ignore-existing;
+      /usr/bin/mc anonymous set public myminio/iceberg/warehouse;
+      "
+    networks:
+      - local-data-lakehouse-iceberg
+    
+  trino:
+    platform: linux/amd64
+    image: trinodb/trino:${TRINO_IMAGE_TAG}
+    container_name: trino
+    ports:
+      - "8088:8080"
+    env_file:
+      - .env
+    volumes:
+      - ./infrastructure/trino/etc/catalog:/etc/trino/catalog
+    depends_on:
+      gravitino:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8088/v1/info" ]
+      interval: 5s
+      timeout: 60s
+      retries: 5
+      start_period: 20s
+    networks:
+      - local-data-lakehouse-iceberg
+
+networks:
+  local-data-lakehouse-iceberg:
